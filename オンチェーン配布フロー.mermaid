@@ -1,0 +1,80 @@
+sequenceDiagram
+    participant PW as 報酬提供者ウォレット
+    participant PC as ProxyAdmin コントラクト
+    participant RP as RewardDistributorProxy
+    participant RC as RewardDistributor 実装
+    participant TK as トークンコントラクト
+    participant UW as ユーザーウォレット
+    participant BE as バックエンド
+
+    %% デプロイフェーズ
+    rect rgb(230, 240, 255)
+      note over PW, PC: デプロイフェーズ
+      PW->>PC: デプロイ
+      PW->>RC: 実装コントラクトデプロイ
+      PW->>RP: プロキシデプロイ(実装アドレス, 初期化データ, ProxyAdmin)
+      RP->>RC: 委譲呼び出し（initialize）
+    end
+
+    %% アセット登録フェーズ
+    rect rgb(240, 248, 255)
+      note over PW, TK: アセット登録フェーズ
+      PW->>TK: トークンMint
+      PW->>TK: approve(RewardDistributorProxy, amount)
+      PW->>RP: registerAsset(tokenAddress, assetType, provider)
+      RP->>RC: 委譲呼び出し
+      RC->>RC: assets[assetId] = Asset構造体を保存
+      RC-->>PW: assetId
+    end
+
+    %% 報酬設定フェーズ
+    rect rgb(255, 240, 240)
+      note over PW, BE: 報酬設定フェーズ
+      PW->>RP: registerRewardWithAirdrop(assetId, airdropId, recipient, amount, tokenId)
+      RP->>RC: 委譲呼び出し
+      RC->>RC: rewards[assetId][rewardId] = Reward構造体を保存
+      RC->>RC: コミットメント計算・保存
+      RC-->>PW: rewardId
+      RC-->>BE: RewardRegisteredイベント発行
+    end
+
+    %% 署名生成フェーズ
+    rect rgb(255, 255, 240)
+      note over UW, BE: 署名生成フェーズ
+      UW->>BE: 報酬請求準備リクエスト
+      BE->>RP: getNonce(userAddress)
+      RP->>RC: 委譲呼び出し
+      RC-->>BE: nonce
+      BE->>BE: 署名生成(chainId, userAddress, assetId, rewardId, nonce)
+      BE-->>UW: 署名とパラメータ
+    end
+
+    %% 報酬請求フェーズ
+    rect rgb(240, 255, 240)
+      note over UW, TK: 報酬請求フェーズ
+      UW->>RP: claimReward(chainId, assetId, rewardId, nonce, signature, amount, tokenId)
+      RP->>RC: 委譲呼び出し
+      RC->>RC: 署名検証
+      RC->>RC: 報酬コミットメント検証
+      RC->>RC: nonce++
+      RC->>RC: 報酬を請求済みとしてマーク
+      
+      alt ERC20の場合
+        RC->>TK: transferFrom(provider, user, amount)
+      else ERC721の場合
+        RC->>TK: safeTransferFrom(provider, user, tokenId)
+      else ERC1155の場合
+        RC->>TK: safeTransferFrom(provider, user, tokenId, amount, "")
+      end
+      
+      TK-->>UW: トークン転送
+      RC-->>BE: RewardClaimedイベント発行
+    end
+
+    %% アップグレードフェーズ（必要時）
+    rect rgb(250, 235, 255)
+      note over PW, RC: アップグレードフェーズ（必要時）
+      PW->>PC: upgradeAndCall(proxy, newImplementation, data)
+      PC->>RP: upgradeTo(newImplementation)
+      RP-->>PW: アップグレード完了
+    end
