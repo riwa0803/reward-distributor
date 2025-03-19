@@ -19,7 +19,9 @@
 システムは以下のコンポーネントで構成されています：
 
 1. **スマートコントラクト**
-   - `RewardDistributorProxy`: 実装コントラクトへの呼び出しを委譲するプロキシ
+   - `AirdropRegistryProxy`: Airdrop情報を管理するプロキシ
+   - `AirdropRegistry`: Airdrop管理機能の実装コントラクト
+   - `RewardDistributorProxy`: 報酬配布機能を委譲するプロキシ
    - `RewardDistributorProxyAdmin`: プロキシ管理用コントラクト
    - `RewardDistributor`: 報酬配布機能の実装コントラクト
 
@@ -47,37 +49,55 @@
 
 本システムは、前回の実装から以下の点を改善しています：
 
-1. **AirdropIDの導入**
+1. **Airdrop管理のコントラクト分離**
+   - Airdrop情報を専用コントラクトで管理
+   - アップグレード時のデータ永続性を強化
+   - より柔軟なAirdrop管理を実現
+
+2. **明確な権限管理**
+   - システム管理者、報酬提供者、Airdrop作成者の権限区分
+   - 権限に応じた操作制限
+   - オペレーターロールによる運用管理の効率化
+
+3. **AirdropIDの導入**
    - 複数の報酬をグループ化し、ユーザーへの表示を改善
    - バックエンドとブロックチェーン間の報酬連携を強化
 
-2. **オンチェーンコミットメント**
+4. **オンチェーンコミットメント**
    - 報酬パラメータのコミットメントをチェーン上に保存
    - 報酬請求時に検証することでセキュリティを強化
 
-3. **署名有効期限機能**
+5. **署名有効期限機能**
    - 署名にタイムスタンプと有効期限を追加
    - 古い署名の悪用を防止する安全機能
    - フロントエンドでの視覚的な期限表示
 
-4. **イベント処理の強化**
+6. **イベント処理の強化**
    - 見逃しイベント検出機能の追加
    - リトライメカニズムの改善
+
+7. **緊急時対応機能**
+   - Pausable機能による緊急時のシステム一時停止
+   - 各コントラクトの個別制御が可能
 
 ## 今後の展望
 
 - マルチチェーン間の報酬集約機能
 - バッチ処理によるガス最適化
 - ユーザーエクスペリエンスのさらなる向上
+- メタデータ管理の強化
+- 報酬分析ダッシュボードの開発
 
 ## ファイル構成
 
 ```
 reward-distribution-system/
 ├── contracts/                      # スマートコントラクト
+│   ├── AirdropRegistry.sol
+│   ├── RewardDistributor.sol
 │   ├── RewardDistributorProxy.sol
 │   ├── RewardDistributorProxyAdmin.sol
-│   └── RewardDistributor.sol
+│   └── interfaces/                 # インターフェース定義
 ├── backend/                       # バックエンド
 │   ├── src/
 │   │   ├── api/                   # API実装
@@ -95,7 +115,8 @@ reward-distribution-system/
 │   └── public/                    # 静的ファイル
 └── docs/                          # ドキュメント
     ├── implementation-guide.md    # 実装指示書
-    └── api-docs.md                # API仕様書
+    ├── api-docs.md                # API仕様書
+    └── sequence-diagrams/         # シーケンス図
 ```
 
 ## 依存パッケージ
