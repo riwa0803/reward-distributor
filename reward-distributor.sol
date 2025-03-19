@@ -6,9 +6,15 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
+
+// AirdropRegistryインターフェース
+interface IAirdropRegistry {
+    function isAirdropValid(uint256 airdropId) external view returns (bool isValid, uint256 endDate);
+}
 
 /**
  * @title RewardDistributor
@@ -16,12 +22,14 @@ import "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
  * プロキシパターンを採用しており、アップグレード可能です
  * AirdropIDとオンチェーンコミットメントによるセキュリティ強化版
  * 署名有効期限機能追加
+ * AirdropRegistryとの連携機能追加
  */
 contract RewardDistributor is 
     Initializable, 
     UUPSUpgradeable, 
     OwnableUpgradeable, 
-    ReentrancyGuardUpgradeable {
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable {
     
     using ECDSAUpgradeable for bytes32;
     
@@ -50,6 +58,9 @@ contract RewardDistributor is
     // 署名の有効期間（秒）
     uint256 public signatureExpiryDuration;
     
+    // AirdropRegistryコントラクトのアドレス
+    address public airdropRegistry;
+    
     // アセットIDからアセット情報へのマッピング
     mapping(uint256 => Asset) public assets;
     
@@ -58,12 +69,18 @@ contract RewardDistributor is
 
     // アセットIDと報酬IDから報酬コミットメントへのマッピング
     mapping(uint256 => mapping(uint256 => bytes32)) public rewardCommitments;
+
+    // 報酬IDからAirdropIDへのマッピング
+    mapping(uint256 => uint256) public rewardAirdropIds;
     
     // 報酬IDの取得済み状態を管理するビットマップ
     mapping(uint256 => mapping(uint256 => uint256)) public claimedBitmap;
     
     // アドレスからノンス値へのマッピング
     mapping(address => uint256) public nonces;
+    
+    // オペレータ権限のマッピング
+    mapping(address => bool) public operators;
     
     // 次のアセットID
     uint256 public nextAssetId;
@@ -78,10 +95,13 @@ contract RewardDistributor is
         uint256 rewardId
     );
     event VerifierUpdated(address previousVerifier, address newVerifier);
+    event AirdropRegistryUpdated(address previousRegistry, address newRegistry);
     event AssetProviderUpdated(uint256 indexed assetId, address previousProvider, address newProvider);
     event AssetStatusUpdated(uint256 indexed assetId, bool isActive);
     event RewardCommitmentSet(uint256 indexed assetId, uint256 indexed rewardId, bytes32 commitment);
     event SignatureExpiryDurationUpdated(uint256 previousDuration, uint256 newDuration);
+    event OperatorAdded(address indexed operator);
+    event OperatorRemoved(address indexed operator);
 
     /**
      * @dev 初期化関数
@@ -92,6 +112,7 @@ contract RewardDistributor is
         __Ownable_init(msg.sender);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
+        __Pausable_init();
         
         verifier = _verifier;
         signatureExpiryDuration = _signatureExpiryDuration;
@@ -116,6 +137,40 @@ contract RewardDistributor is
     }
 
     /**
+     * @dev AirdropRegistryアドレスの設定
+     * @param _registry AirdropRegistryコントラクトのアドレス
+     */
+    function setAirdropRegistry(address _registry) external onlyOwner {
+        require(_registry != address(0), "Invalid registry address");
+        address previousRegistry = airdropRegistry;
+        airdropRegistry = _registry;
+        emit AirdropRegistryUpdated(previousRegistry, _registry);
+    }
+    
+    /**
+     * @dev オペレータの追加
+     * @param _operator オペレータのアドレス
+     */
+    function addOperator(address _operator) external onlyOwner {
+        require(_operator != address(0), "Invalid operator address");
+        require(!operators[_operator], "Already an operator");
+        
+        operators[_operator] = true;
+        emit OperatorAdded(_operator);
+    }
+    
+    /**
+     * @dev オペレータの削除
+     * @param _operator オペレータのアドレス
+     */
+    function removeOperator(address _operator) external onlyOwner {
+        require(operators[_operator], "Not an operator");
+        
+        operators[_operator] = false;
+        emit OperatorRemoved(_operator);
+    }
+
+    /**
      * @dev 署名有効期間の更新
      * @param _signatureExpiryDuration 新しい署名有効期間（秒）
      */
@@ -137,9 +192,10 @@ contract RewardDistributor is
         address _tokenAddress,
         AssetType _assetType,
         address _provider
-    ) external onlyOwner returns (uint256) {
+    ) external whenNotPaused returns (uint256) {
         require(_tokenAddress != address(0), "Invalid token address");
         require(_provider != address(0), "Invalid provider address");
+        require(msg.sender == owner() || operators[msg.sender], "Unauthorized");
         
         uint256 assetId = nextAssetId;
         assets[assetId] = Asset({
@@ -161,9 +217,15 @@ contract RewardDistributor is
      * @param _assetId アセットID
      * @param _newProvider 新しい提供者アドレス
      */
-    function updateAssetProvider(uint256 _assetId, address _newProvider) external onlyOwner {
+    function updateAssetProvider(uint256 _assetId, address _newProvider) external whenNotPaused {
         require(assets[_assetId].tokenAddress != address(0), "Asset does not exist");
         require(_newProvider != address(0), "Invalid provider address");
+        require(
+            msg.sender == owner() || 
+            operators[msg.sender] || 
+            msg.sender == assets[_assetId].provider, 
+            "Unauthorized"
+        );
         
         address previousProvider = assets[_assetId].provider;
         assets[_assetId].provider = _newProvider;
@@ -176,8 +238,14 @@ contract RewardDistributor is
      * @param _assetId アセットID
      * @param _isActive アクティブ状態
      */
-    function updateAssetStatus(uint256 _assetId, bool _isActive) external onlyOwner {
+    function updateAssetStatus(uint256 _assetId, bool _isActive) external whenNotPaused {
         require(assets[_assetId].tokenAddress != address(0), "Asset does not exist");
+        require(
+            msg.sender == owner() || 
+            operators[msg.sender] || 
+            msg.sender == assets[_assetId].provider, 
+            "Unauthorized"
+        );
         
         assets[_assetId].isActive = _isActive;
         
@@ -199,11 +267,22 @@ contract RewardDistributor is
         address _recipient,
         uint256 _amount,
         uint256 _tokenId
-    ) external returns (uint256) {
+    ) external whenNotPaused returns (uint256) {
         require(assets[_assetId].tokenAddress != address(0), "Asset does not exist");
         require(assets[_assetId].isActive, "Asset is not active");
         require(_recipient != address(0), "Invalid recipient address");
-        require(msg.sender == owner() || msg.sender == assets[_assetId].provider, "Unauthorized");
+        require(
+            msg.sender == owner() || 
+            operators[msg.sender] || 
+            msg.sender == assets[_assetId].provider, 
+            "Unauthorized"
+        );
+        
+        // Airdropの有効性をチェック（AirdropRegistryが設定されている場合）
+        if (airdropRegistry != address(0)) {
+            (bool isValid, ) = IAirdropRegistry(airdropRegistry).isAirdropValid(_airdropId);
+            require(isValid, "Airdrop is not valid");
+        }
         
         // 次の利用可能な報酬IDを計算（簡易実装）
         uint256 rewardId = uint256(keccak256(abi.encodePacked(_assetId, _airdropId, _recipient, block.timestamp)));
@@ -215,6 +294,9 @@ contract RewardDistributor is
             tokenId: _tokenId,
             claimed: false
         });
+        
+        // AirdropIDとの関連付け
+        rewardAirdropIds[rewardId] = _airdropId;
         
         // 報酬パラメータのコミットメントを計算
         bytes32 commitment = keccak256(abi.encodePacked(
@@ -275,7 +357,7 @@ contract RewardDistributor is
         bytes calldata _signature,
         uint256 _amount,
         uint256 _tokenId
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         require(_nonce == nonces[msg.sender], "Invalid nonce");
         
         // タイムスタンプの有効期限チェック
@@ -283,6 +365,13 @@ contract RewardDistributor is
         
         // 既に請求済みでないことを確認
         require(!isRewardClaimed(_assetId, _rewardId), "Reward already claimed");
+        
+        // Airdropの有効性をチェック（AirdropRegistryが設定されている場合）
+        if (airdropRegistry != address(0)) {
+            uint256 airdropId = rewardAirdropIds[_rewardId];
+            (bool isValid, ) = IAirdropRegistry(airdropRegistry).isAirdropValid(airdropId);
+            require(isValid, "Airdrop is not valid");
+        }
         
         // 署名検証
         bytes32 messageHash = keccak256(abi.encodePacked(
@@ -367,6 +456,7 @@ contract RewardDistributor is
      * @dev バックエンドからの報酬設定（オプション - システム設計によっては不要）
      * @param _assetId アセットID
      * @param _rewardId 報酬ID
+     * @param _airdropId AirdropID
      * @param _recipient 受取人アドレス
      * @param _amount 数量
      * @param _tokenId トークンID
@@ -374,11 +464,12 @@ contract RewardDistributor is
     function setReward(
         uint256 _assetId,
         uint256 _rewardId,
+        uint256 _airdropId,
         address _recipient,
         uint256 _amount,
         uint256 _tokenId
-    ) external {
-        require(msg.sender == owner() || msg.sender == verifier, "Unauthorized");
+    ) external whenNotPaused {
+        require(msg.sender == owner() || operators[msg.sender] || msg.sender == verifier, "Unauthorized");
         require(assets[_assetId].tokenAddress != address(0), "Asset does not exist");
         require(_recipient != address(0), "Invalid recipient");
         require(rewards[_assetId][_rewardId].userAddress == address(0), "Reward already exists");
@@ -390,6 +481,9 @@ contract RewardDistributor is
             claimed: false
         });
         
+        // AirdropIDとの関連付け
+        rewardAirdropIds[_rewardId] = _airdropId;
+        
         // コミットメントも設定
         bytes32 commitment = keccak256(abi.encodePacked(
             _recipient,
@@ -399,6 +493,7 @@ contract RewardDistributor is
         
         rewardCommitments[_assetId][_rewardId] = commitment;
         emit RewardCommitmentSet(_assetId, _rewardId, commitment);
+        emit RewardRegistered(_assetId, _airdropId, _rewardId, _recipient, _amount, _tokenId);
     }
     
     /**
@@ -408,5 +503,19 @@ contract RewardDistributor is
      */
     function getNonce(address _user) external view returns (uint256) {
         return nonces[_user];
+    }
+    
+    /**
+     * @dev 緊急停止
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+    
+    /**
+     * @dev 緊急停止解除
+     */
+    function unpause() external onlyOwner {
+        _unpause();
     }
 }
