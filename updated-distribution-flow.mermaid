@@ -1,0 +1,131 @@
+sequenceDiagram
+    participant AM as システム管理者ウォレット
+    participant PW as 報酬提供者
+    participant PA as ProxyAdmin コントラクト
+    participant ARP as AirdropRegistryProxy
+    participant AR as AirdropRegistry 実装
+    participant RDP as RewardDistributorProxy
+    participant RD as RewardDistributor 実装
+    participant TK as トークンコントラクト
+    participant UW as ユーザーウォレット
+    participant BE as バックエンド
+
+    %% デプロイフェーズ
+    rect rgb(230, 240, 255)
+      note over AM, RD: デプロイフェーズ (システム管理者)
+      AM->>PA: デプロイ（ProxyAdmin）
+      AM->>AR: デプロイ（AirdropRegistry 実装）
+      AM->>RD: デプロイ（RewardDistributor 実装）
+      AM->>ARP: デプロイ（ARP(AR実装アドレス, 初期化データ, PA)）
+      ARP->>AR: 委譲呼び出し（initialize）
+      AM->>RDP: デプロイ（RDP(RD実装アドレス, 初期化データ, PA)）
+      RDP->>RD: 委譲呼び出し（initialize）
+      AM->>RDP: setAirdropRegistry(AirDropRegistryProxy)
+      RDP->>RD: 委譲呼び出し
+    end
+
+
+
+    %% アセット登録フェーズ
+    rect rgb(240, 248, 255)
+      note over PW, TK: アセット登録フェーズ (報酬提供者)
+      PW->>TK: トークンMint
+      PW->>TK: approve(RewardDistributorProxy, amount)
+      PW->>RDP: registerAsset(tokenAddress, assetType, provider)
+      RDP->>RD: 委譲呼び出し
+      RD->>RD: assets[assetId] = Asset構造体を保存
+      RD-->>PW: assetId
+      RD-->>BE: AssetRegisteredイベント発行
+      BE->>BE: イベント検知
+    end
+
+    %% 報酬設定フェーズ
+    rect rgb(255, 240, 240)
+      note over PW, BE: 報酬設定フェーズ (報酬提供者)
+      PW->>RDP: registerRewardWithAirdrop(assetId, airdropId, recipient, amount, tokenId)
+      RDP->>RD: 委譲呼び出し
+      RD->>RD: 報酬提供者の権限確認
+      RD->>ARP: isAirdropValid(airdropId)
+      ARP->>AR: 委譲呼び出し
+      AR->>AR: 有効期限とアクティブ状態を確認
+      AR-->>RD: Airdropの有効性(true/false)
+      RD->>RD: rewards[assetId][rewardId] = Reward構造体を保存
+      RD->>RD: コミットメント計算・保存
+      RD-->>PW: rewardId
+      RD-->>BE: RewardRegisteredイベント発行
+    end
+
+    %% 署名生成フェーズ
+    rect rgb(255, 255, 240)
+      note over UW, BE: 署名生成フェーズ (ユーザー)
+      UW->>BE: 報酬請求準備リクエスト
+      BE->>ARP: isAirdropValid(airdropId)
+      ARP->>AR: 委譲呼び出し
+      AR-->>BE: 有効性(true/false)
+      BE->>RDP: getNonce(userAddress)
+      RDP->>RD: 委譲呼び出し
+      RD-->>BE: nonce
+      BE->>BE: 署名生成(chainId, userAddress, assetId, rewardId, airdropId, nonce, timestamp)
+      BE-->>UW: 署名とパラメータ
+    end
+
+    %% 報酬請求フェーズ
+    rect rgb(240, 255, 240)
+      note over UW, TK: 報酬請求フェーズ (ユーザー)
+      UW->>RDP: claimReward(chainId, assetId, rewardId, nonce, timestamp, signature, amount, tokenId)
+      RDP->>RD: 委譲呼び出し
+      RD->>ARP: isAirdropValid(airdropId)
+      ARP->>AR: 委譲呼び出し
+      AR-->>RD: 有効性(true/false)
+      RD->>RD: 署名検証と有効期限チェック
+      RD->>RD: 報酬コミットメント検証
+      RD->>RD: nonce++
+      RD->>RD: 報酬を請求済みとしてマーク
+      
+      alt ERC20の場合
+        RD->>TK: transferFrom(provider, user, amount)
+      else ERC721の場合
+        RD->>TK: safeTransferFrom(provider, user, tokenId)
+      else ERC1155の場合
+        RD->>TK: safeTransferFrom(provider, user, tokenId, amount, "")
+      end
+      
+      TK-->>UW: トークン転送
+      RD-->>BE: RewardClaimedイベント発行
+    end
+
+    %% Airdrop更新フェーズ
+    rect rgb(250, 240, 230)
+      note over PW, AR: Airdrop更新フェーズ (報酬提供者)
+      PW->>ARP: updateAirdropPeriod(airdropId, newStartDate, newEndDate)
+      ARP->>AR: 委譲呼び出し
+      AR->>AR: 権限確認(isOwner || isOperator || isCreator)
+      AR->>AR: airdrops[airdropId]を更新
+      AR-->>PW: 更新完了
+      AR-->>BE: AirdropPeriodUpdatedイベント発行
+    end
+
+    %% Airdrop終了フェーズ
+    rect rgb(255, 235, 235)
+      note over PW, AR: Airdrop終了フェーズ (報酬提供者)
+      PW->>ARP: updateAirdropStatus(airdropId, false)
+      ARP->>AR: 委譲呼び出し
+      AR->>AR: 権限確認(isOwner || isOperator || isCreator)
+      AR->>AR: airdrops[airdropId].isActive = false
+      AR-->>PW: 更新完了
+      AR-->>BE: AirdropStatusUpdatedイベント発行
+    end
+
+    %% アップグレードフェーズ（必要時）
+    rect rgb(250, 235, 255)
+      note over AM, PA: アップグレードフェーズ (システム管理者)
+      alt AirdropRegistry アップグレード
+        AM->>PA: upgradeAndCall(ARP, newARImplementation, data)
+        PA->>ARP: upgradeTo(newARImplementation)
+        ARP-->>AM: アップグレード完了
+      else RewardDistributor アップグレード
+        AM->>PA: upgradeAndCall(RDP, newRDImplementation, data)
+        PA->>RDP: upgradeTo(newRDImplementation)
+        RDP-->>AM: アップグレード完了
+      end
+    end
