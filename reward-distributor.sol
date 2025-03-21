@@ -23,6 +23,7 @@ interface IAirdropRegistry {
  * AirdropIDとオンチェーンコミットメントによるセキュリティ強化版
  * 署名有効期限機能追加
  * AirdropRegistryとの連携機能追加
+ * バッチ請求機能追加によるガス最適化
  */
 contract RewardDistributor is 
     Initializable, 
@@ -50,6 +51,17 @@ contract RewardDistributor is
         uint256 amount;        // 数量（ERC20の場合はトークン数、ERC721/ERC1155の場合は常に1）
         uint256 tokenId;       // トークンID（ERC721/ERC1155の場合に使用）
         bool claimed;          // 受取済みフラグ
+    }
+
+    // バッチクレーム用のパラメータ構造体
+    struct ClaimParams {
+        uint256 chainId;       // チェーンID
+        uint256 assetId;       // アセットID
+        uint256 rewardId;      // 報酬ID
+        uint256 timestamp;     // 署名タイムスタンプ
+        bytes signature;       // 署名
+        uint256 amount;        // 数量
+        uint256 tokenId;       // トークンID
     }
 
     // バックエンド署名検証用のアドレス
@@ -93,6 +105,10 @@ contract RewardDistributor is
         address indexed userAddress,
         uint256 indexed assetId,
         uint256 rewardId
+    );
+    event BatchRewardClaimed(
+        address indexed userAddress,
+        uint256 claimCount
     );
     event VerifierUpdated(address previousVerifier, address newVerifier);
     event AirdropRegistryUpdated(address previousRegistry, address newRegistry);
@@ -338,6 +354,72 @@ contract RewardDistributor is
     }
     
     /**
+     * @dev 署名の検証（内部関数）
+     * @param _chainId チェーンID
+     * @param _userAddress ユーザーアドレス
+     * @param _assetId アセットID
+     * @param _rewardId 報酬ID
+     * @param _nonce ノンス
+     * @param _timestamp タイムスタンプ
+     * @param _signature 署名
+     * @return 検証結果
+     */
+    function _verifySignature(
+        uint256 _chainId,
+        address _userAddress,
+        uint256 _assetId,
+        uint256 _rewardId,
+        uint256 _nonce,
+        uint256 _timestamp,
+        bytes calldata _signature
+    ) internal view returns (bool) {
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            _chainId,
+            _userAddress,
+            _assetId,
+            _rewardId,
+            _nonce,
+            _timestamp
+        ));
+        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
+        address recoveredAddress = ethSignedMessageHash.recover(_signature);
+        return recoveredAddress == verifier;
+    }
+    
+    /**
+     * @dev トークンの転送処理（内部関数）
+     * @param _asset アセット情報
+     * @param _provider 提供者アドレス
+     * @param _recipient 受取人アドレス
+     * @param _amount 数量
+     * @param _tokenId トークンID
+     */
+    function _transferToken(
+        Asset storage _asset,
+        address _provider,
+        address _recipient,
+        uint256 _amount,
+        uint256 _tokenId
+    ) internal {
+        if (_asset.assetType == AssetType.ERC20) {
+            require(
+                IERC20(_asset.tokenAddress).transferFrom(_provider, _recipient, _amount),
+                "ERC20 transfer failed"
+            );
+        } else if (_asset.assetType == AssetType.ERC721) {
+            IERC721(_asset.tokenAddress).safeTransferFrom(_provider, _recipient, _tokenId);
+        } else if (_asset.assetType == AssetType.ERC1155) {
+            IERC1155(_asset.tokenAddress).safeTransferFrom(
+                _provider,
+                _recipient,
+                _tokenId,
+                _amount,
+                ""
+            );
+        }
+    }
+    
+    /**
      * @dev 報酬の請求処理（タイムスタンプ付き署名）
      * @param _chainId チェーンID
      * @param _assetId アセットID
@@ -374,17 +456,7 @@ contract RewardDistributor is
         }
         
         // 署名検証
-        bytes32 messageHash = keccak256(abi.encodePacked(
-            _chainId,
-            msg.sender,
-            _assetId,
-            _rewardId,
-            _nonce,
-            _timestamp
-        ));
-        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
-        address recoveredAddress = ethSignedMessageHash.recover(_signature);
-        require(recoveredAddress == verifier, "Invalid signature");
+        require(_verifySignature(_chainId, msg.sender, _assetId, _rewardId, _nonce, _timestamp, _signature), "Invalid signature");
         
         // アセット存在確認
         Asset storage asset = assets[_assetId];
@@ -425,23 +497,8 @@ contract RewardDistributor is
         _markRewardClaimed(_assetId, _rewardId);
         reward.claimed = true;
         
-        // アセットタイプに応じたトークン転送
-        if (asset.assetType == AssetType.ERC20) {
-            require(
-                IERC20(asset.tokenAddress).transferFrom(asset.provider, msg.sender, reward.amount),
-                "ERC20 transfer failed"
-            );
-        } else if (asset.assetType == AssetType.ERC721) {
-            IERC721(asset.tokenAddress).safeTransferFrom(asset.provider, msg.sender, reward.tokenId);
-        } else if (asset.assetType == AssetType.ERC1155) {
-            IERC1155(asset.tokenAddress).safeTransferFrom(
-                asset.provider,
-                msg.sender,
-                reward.tokenId,
-                reward.amount,
-                ""
-            );
-        }
+        // トークン転送
+        _transferToken(asset, asset.provider, msg.sender, reward.amount, reward.tokenId);
         
         // イベント発行
         emit RewardClaimed(
@@ -450,6 +507,117 @@ contract RewardDistributor is
             _assetId,
             _rewardId
         );
+    }
+    
+    /**
+     * @dev 複数報酬の一括請求（ガス最適化）
+     * @param _params 請求パラメータの配列
+     * @param _nonce ユーザーの現在のノンス
+     * @notice 同一のAirdropの報酬のみをバッチ処理できます
+     */
+    function claimRewardBatch(
+        ClaimParams[] calldata _params,
+        uint256 _nonce
+    ) external nonReentrant whenNotPaused {
+        require(_params.length > 0, "Empty params array");
+        require(_nonce == nonces[msg.sender], "Invalid nonce");
+        
+        // ユーザーのノンスをインクリメント（一度だけ）
+        nonces[msg.sender]++;
+        
+        // 正常に処理された請求の数をカウント
+        uint256 successfulClaims = 0;
+        
+        // Airdropの有効性チェック用の変数
+        uint256 lastAirdropId = 0;
+        bool airdropChecked = false;
+        
+        for (uint256 i = 0; i < _params.length; i++) {
+            ClaimParams calldata param = _params[i];
+            
+            // 既にチェック済みのパラメータはスキップ
+            if (isRewardClaimed(param.assetId, param.rewardId)) continue;
+            
+            // タイムスタンプの有効期限チェック
+            if (param.timestamp + signatureExpiryDuration < block.timestamp) continue;
+            
+            // Airdropの有効性をチェック（必要な場合のみ）
+            uint256 currentAirdropId = rewardAirdropIds[param.rewardId];
+            if (airdropRegistry != address(0)) {
+                // 異なるAirdropIDの場合のみチェックを実行
+                if (!airdropChecked || lastAirdropId != currentAirdropId) {
+                    (bool isValid, ) = IAirdropRegistry(airdropRegistry).isAirdropValid(currentAirdropId);
+                    if (!isValid) continue; // 無効なAirdropの報酬はスキップ
+                    
+                    lastAirdropId = currentAirdropId;
+                    airdropChecked = true;
+                }
+            }
+            
+            // 署名検証
+            if (!_verifySignature(param.chainId, msg.sender, param.assetId, param.rewardId, _nonce, param.timestamp, param.signature)) {
+                continue; // 無効な署名はスキップ
+            }
+            
+            // アセット存在確認
+            Asset storage asset = assets[param.assetId];
+            if (asset.tokenAddress == address(0) || !asset.isActive) continue;
+            
+            // 報酬情報取得と検証
+            Reward storage reward = rewards[param.assetId][param.rewardId];
+            
+            // コミットメントの検証（設定されている場合）
+            bytes32 commitment = rewardCommitments[param.assetId][param.rewardId];
+            if (commitment != bytes32(0)) {
+                bytes32 claimCommitment = keccak256(abi.encodePacked(
+                    msg.sender,
+                    param.amount,
+                    param.tokenId
+                ));
+                if (claimCommitment != commitment) continue; // コミットメント不一致はスキップ
+            }
+            
+            // 報酬が既に設定されていない場合は、バックエンドが署名した情報を使用
+            if (reward.userAddress == address(0)) {
+                reward.userAddress = msg.sender;
+                reward.amount = param.amount;
+                reward.tokenId = param.tokenId;
+                reward.claimed = false;
+            } else {
+                // 報酬が既に設定されている場合は、受取人と金額のチェック
+                if (reward.userAddress != msg.sender || 
+                    reward.amount != param.amount || 
+                    reward.tokenId != param.tokenId) {
+                    continue; // 不一致はスキップ
+                }
+            }
+            
+            // 報酬を取得済みとしてマーク
+            _markRewardClaimed(param.assetId, param.rewardId);
+            reward.claimed = true;
+            
+            // トークン転送
+            try {
+                _transferToken(asset, asset.provider, msg.sender, reward.amount, reward.tokenId);
+                successfulClaims++;
+                
+                // 個別の報酬請求イベントを発行
+                emit RewardClaimed(
+                    param.chainId,
+                    msg.sender,
+                    param.assetId,
+                    param.rewardId
+                );
+            } catch {
+                // トークン転送に失敗した場合はこの報酬をスキップし、次へ進む
+                // 請求済みマークは戻さないため、再請求は不可能（エラーの原因によってはバックエンドで処理が必要）
+                continue;
+            }
+        }
+        
+        // バッチ処理の結果をイベントとして発行
+        require(successfulClaims > 0, "No rewards claimed successfully");
+        emit BatchRewardClaimed(msg.sender, successfulClaims);
     }
     
     /**

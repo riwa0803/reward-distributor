@@ -52,22 +52,42 @@ export async function registerAirdrop(
       creator_address: airdropData.creatorAddress.toLowerCase(),
       created_at: new Date(),
       updated_at: new Date()
-    }
+    });
     
-    // イベントログの記録
+    const createdAirdrop = await trx('airdrops')
+      .where('id', airdropId)
+      .first();
+    
+    // Airdropイベントログの記録
     await trx('airdrop_event_logs').insert({
-      chain_id: eventData.chainId,
-      airdrop_id: eventData.airdropId,
-      event_type: eventData.eventType,
-      transaction_hash: eventData.transactionHash,
-      block_number: eventData.blockNumber,
-      creator_address: eventData.creatorAddress.toLowerCase(),
-      start_date: eventData.startDate,
-      end_date: eventData.endDate,
-      is_active: eventData.isActive,
+      chain_id: chainId,
+      airdrop_id: airdropData.onchainId,
+      event_type: AirdropEventType.CREATED,
+      transaction_hash: '', // オンチェーンイベントから取得する場合はここに入れる
+      block_number: 0, // オンチェーンイベントから取得する場合はここに入れる
+      creator_address: airdropData.creatorAddress.toLowerCase(),
+      start_date: airdropData.startDate,
+      end_date: airdropData.endDate,
+      is_active: airdropData.isActive ?? true,
       created_at: new Date()
     });
+    
+    return {
+      id: createdAirdrop.id,
+      onchainId: createdAirdrop.onchain_id,
+      name: createdAirdrop.name,
+      description: createdAirdrop.description,
+      imageUrl: createdAirdrop.image_url,
+      startDate: new Date(createdAirdrop.start_date),
+      endDate: new Date(createdAirdrop.end_date),
+      isActive: createdAirdrop.is_active,
+      creatorAddress: createdAirdrop.creator_address,
+      createdAt: new Date(createdAirdrop.created_at),
+      updatedAt: new Date(createdAirdrop.updated_at)
+    };
   });
+  
+  return airdrop;
 }
 
 /**
@@ -402,42 +422,96 @@ export async function processRetryQueue(): Promise<void> {
         });
     }
   }
-});
-    
-    const createdAirdrop = await trx('airdrops')
-      .where('id', airdropId)
+}
+
+/**
+ * オンチェーンのAirdropイベントを処理
+ * @param eventData イベントデータ
+ */
+export async function processAirdropEvent(eventData: {
+  chainId: number;
+  eventType: AirdropEventType;
+  airdropId: number;
+  startDate?: Date;
+  endDate?: Date;
+  isActive?: boolean;
+  creatorAddress: string;
+  transactionHash: string;
+  blockNumber: number;
+}): Promise<void> {
+  // トランザクション内で処理を実行
+  await db.transaction(async (trx) => {
+    // Airdropの存在確認
+    const existingAirdrop = await trx('airdrops')
+      .where('onchain_id', eventData.airdropId)
       .first();
     
-    // Airdropイベントログの記録
+    if (eventData.eventType === AirdropEventType.CREATED) {
+      // 新規Airdropの場合
+      if (!existingAirdrop) {
+        await trx('airdrops').insert({
+          onchain_id: eventData.airdropId,
+          name: `Airdrop #${eventData.airdropId}`, // オンチェーンにはnameがない場合はデフォルト名
+          description: '',
+          start_date: eventData.startDate,
+          end_date: eventData.endDate,
+          is_active: eventData.isActive ?? true,
+          creator_address: eventData.creatorAddress.toLowerCase(),
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      } else {
+        // すでに存在している場合は更新
+        await trx('airdrops')
+          .where('onchain_id', eventData.airdropId)
+          .update({
+            start_date: eventData.startDate,
+            end_date: eventData.endDate,
+            is_active: eventData.isActive ?? true,
+            updated_at: new Date()
+          });
+      }
+    } else if (eventData.eventType === AirdropEventType.UPDATED || eventData.eventType === AirdropEventType.EXTENDED) {
+      // Airdrop期間またはステータスの更新
+      if (existingAirdrop) {
+        const updateData: any = {
+          updated_at: new Date()
+        };
+        
+        if (eventData.startDate) updateData.start_date = eventData.startDate;
+        if (eventData.endDate) updateData.end_date = eventData.endDate;
+        if (eventData.isActive !== undefined) updateData.is_active = eventData.isActive;
+        
+        await trx('airdrops')
+          .where('onchain_id', eventData.airdropId)
+          .update(updateData);
+      }
+    } else if (eventData.eventType === AirdropEventType.DISABLED) {
+      // Airdropの無効化
+      if (existingAirdrop) {
+        await trx('airdrops')
+          .where('onchain_id', eventData.airdropId)
+          .update({
+            is_active: false,
+            updated_at: new Date()
+          });
+      }
+    }
+    
+    // イベントログの記録
     await trx('airdrop_event_logs').insert({
-      chain_id: chainId,
-      airdrop_id: airdropData.onchainId,
-      event_type: AirdropEventType.CREATED,
-      transaction_hash: '', // オンチェーンイベントから取得する場合はここに入れる
-      block_number: 0, // オンチェーンイベントから取得する場合はここに入れる
-      creator_address: airdropData.creatorAddress.toLowerCase(),
-      start_date: airdropData.startDate,
-      end_date: airdropData.endDate,
-      is_active: airdropData.isActive ?? true,
+      chain_id: eventData.chainId,
+      airdrop_id: eventData.airdropId,
+      event_type: eventData.eventType,
+      transaction_hash: eventData.transactionHash,
+      block_number: eventData.blockNumber,
+      creator_address: eventData.creatorAddress.toLowerCase(),
+      start_date: eventData.startDate,
+      end_date: eventData.endDate,
+      is_active: eventData.isActive,
       created_at: new Date()
     });
-    
-    return {
-      id: createdAirdrop.id,
-      onchainId: createdAirdrop.onchain_id,
-      name: createdAirdrop.name,
-      description: createdAirdrop.description,
-      imageUrl: createdAirdrop.image_url,
-      startDate: new Date(createdAirdrop.start_date),
-      endDate: new Date(createdAirdrop.end_date),
-      isActive: createdAirdrop.is_active,
-      creatorAddress: createdAirdrop.creator_address,
-      createdAt: new Date(createdAirdrop.created_at),
-      updatedAt: new Date(createdAirdrop.updated_at)
-    };
   });
-  
-  return airdrop;
 }
 
 /**
@@ -567,78 +641,3 @@ export async function updateAirdropStatus(
   
   return airdrop;
 }
-
-/**
- * オンチェーンのAirdropイベントを処理
- * @param eventData イベントデータ
- */
-export async function processAirdropEvent(eventData: {
-  chainId: number;
-  eventType: AirdropEventType;
-  airdropId: number;
-  startDate?: Date;
-  endDate?: Date;
-  isActive?: boolean;
-  creatorAddress: string;
-  transactionHash: string;
-  blockNumber: number;
-}): Promise<void> {
-  // トランザクション内で処理を実行
-  await db.transaction(async (trx) => {
-    // Airdropの存在確認
-    const existingAirdrop = await trx('airdrops')
-      .where('onchain_id', eventData.airdropId)
-      .first();
-    
-    if (eventData.eventType === AirdropEventType.CREATED) {
-      // 新規Airdropの場合
-      if (!existingAirdrop) {
-        await trx('airdrops').insert({
-          onchain_id: eventData.airdropId,
-          name: `Airdrop #${eventData.airdropId}`, // オンチェーンにはnameがない場合はデフォルト名
-          description: '',
-          start_date: eventData.startDate,
-          end_date: eventData.endDate,
-          is_active: eventData.isActive ?? true,
-          creator_address: eventData.creatorAddress.toLowerCase(),
-          created_at: new Date(),
-          updated_at: new Date()
-        });
-      } else {
-        // すでに存在している場合は更新
-        await trx('airdrops')
-          .where('onchain_id', eventData.airdropId)
-          .update({
-            start_date: eventData.startDate,
-            end_date: eventData.endDate,
-            is_active: eventData.isActive ?? true,
-            updated_at: new Date()
-          });
-      }
-    } else if (eventData.eventType === AirdropEventType.UPDATED || eventData.eventType === AirdropEventType.EXTENDED) {
-      // Airdrop期間またはステータスの更新
-      if (existingAirdrop) {
-        const updateData: any = {
-          updated_at: new Date()
-        };
-        
-        if (eventData.startDate) updateData.start_date = eventData.startDate;
-        if (eventData.endDate) updateData.end_date = eventData.endDate;
-        if (eventData.isActive !== undefined) updateData.is_active = eventData.isActive;
-        
-        await trx('airdrops')
-          .where('onchain_id', eventData.airdropId)
-          .update(updateData);
-      }
-    } else if (eventData.eventType === AirdropEventType.DISABLED) {
-      // Airdropの無効化
-      if (existingAirdrop) {
-        await trx('airdrops')
-          .where('onchain_id', eventData.airdropId)
-          .update({
-            is_active: false,
-            updated_at: new Date()
-          });
-      }
-    }
-      
