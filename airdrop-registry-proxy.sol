@@ -4,12 +4,12 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
- * @title RewardDistributorProxy
- * @dev RewardDistributor コントラクトのプロキシ
+ * @title AirdropRegistryProxy
+ * @dev AirdropRegistry コントラクトのプロキシ
  * UUPSアップグレード可能なプロキシパターンを使用
  * ProxyAdmin コントラクトが実際の管理を行う
  */
-contract RewardDistributorProxy is ERC1967Proxy {
+contract AirdropRegistryProxy is ERC1967Proxy {
     /**
      * @dev コンストラクタ
      * @param _implementation 初期実装コントラクトのアドレス
