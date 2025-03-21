@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import { db } from './database';
-import { RewardDistributorABI } from './abis';
-import { getChainConfig, getContractAddress } from './utils';
+import { RewardDistributorABI, AirdropRegistryABI } from './abis';
+import { getChainConfig } from './utils';
 import { RewardStatus } from './types';
 
 /**
@@ -9,6 +9,7 @@ import { RewardStatus } from './types';
  * @param chainId チェーンID
  * @param assetId アセットID
  * @param rewardId 報酬ID
+ * @param airdropId AirdropID
  * @param userAddress ユーザーアドレス
  * @returns 署名データとパラメータ
  */
@@ -16,11 +17,13 @@ export async function prepareRewardClaim(
   chainId: number,
   assetId: number,
   rewardId: number,
+  airdropId: number,
   userAddress: string
 ): Promise<{
   chainId: number;
   assetId: number;
   rewardId: number;
+  airdropId: number;
   amount: number;
   tokenId: number;
   nonce: number;
@@ -47,14 +50,31 @@ export async function prepareRewardClaim(
     throw new Error(`Reward already ${reward.status.toLowerCase()}`);
   }
   
-  // オンチェーンの請求状態を確認
-  const provider = new ethers.providers.JsonRpcProvider(getChainConfig(chainId).rpcUrl);
+  // チェーン設定の取得
+  const chainConfig = getChainConfig(chainId);
+  
+  // Airdropの有効性をチェック
+  const airdropRegistryProvider = new ethers.providers.JsonRpcProvider(chainConfig.rpcUrl);
+  const airdropRegistry = new ethers.Contract(
+    chainConfig.airdropRegistryAddress,
+    AirdropRegistryABI,
+    airdropRegistryProvider
+  );
+  
+  const [isAirdropValid, ] = await airdropRegistry.isAirdropValid(airdropId);
+  if (!isAirdropValid) {
+    throw new Error('Airdrop is not valid or has expired');
+  }
+  
+  // RewardDistributorの参照
+  const provider = new ethers.providers.JsonRpcProvider(chainConfig.rpcUrl);
   const contract = new ethers.Contract(
-    getContractAddress(chainId),
+    chainConfig.rewardDistributorAddress,
     RewardDistributorABI,
     provider
   );
   
+  // オンチェーンの請求状態を確認
   const isClaimed = await contract.isRewardClaimed(assetId, rewardId);
   if (isClaimed) {
     throw new Error('Reward already claimed on-chain');
@@ -100,6 +120,7 @@ export async function prepareRewardClaim(
     chainId,
     assetId,
     rewardId,
+    airdropId,
     amount: reward.amount,
     tokenId: reward.token_id || 0,
     nonce: nonce.toNumber(),

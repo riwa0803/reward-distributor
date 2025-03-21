@@ -11,6 +11,7 @@ interface ClaimRewardProps {
   chainId: number;
   assetId: number;
   rewardId: number;
+  airdropId: number; // Airdrop ID追加
   contractAddress: string;
 }
 
@@ -18,6 +19,7 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
   chainId,
   assetId,
   rewardId,
+  airdropId, // Airdrop ID追加
   contractAddress
 }) => {
   const [loading, setLoading] = useState(false);
@@ -76,6 +78,7 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
           chainId,
           assetId,
           rewardId,
+          airdropId, // Airdrop ID追加
           userAddress
         })
       });
@@ -142,7 +145,14 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
       setClaimData(null);
     } catch (error) {
       console.error('Error claiming reward:', error);
-      message.error('報酬請求に失敗しました: ' + (error as any).message || '不明なエラー');
+      // エラーメッセージの改善: Airdrop無効の特定エラーメッセージをわかりやすく表示
+      const errorMsg = (error as any).message || '不明なエラー';
+      
+      if (errorMsg.includes('Airdrop is not valid')) {
+        message.error('このAirdropはすでに終了しているか、無効になっています');
+      } else {
+        message.error('報酬請求に失敗しました: ' + errorMsg);
+      }
     } finally {
       setClaiming(false);
     }
