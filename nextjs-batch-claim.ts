@@ -1,21 +1,25 @@
+'use client';
+
 import React, { useState, useEffect } from 'react';
-import { ethers } from 'ethers';
 import { 
-  Button, Card, Typography, Table, Tag, Space, message, 
-  Modal, Alert, Tooltip, Progress, Checkbox, Badge
+  Button, Card, Typography, Table, Tag, Space, Modal, 
+  Alert, Tooltip, Progress, Checkbox, Badge, Spin
 } from 'antd';
 import { 
   ClockCircleOutlined, InfoCircleOutlined, 
   CheckCircleOutlined, WarningOutlined, 
   SafetyOutlined, QuestionCircleOutlined
 } from '@ant-design/icons';
-import { RewardDistributorABI } from '../abis';
 import { formatDistanceToNow } from 'date-fns';
 import { ja } from 'date-fns/locale';
+import dynamic from 'next/dynamic';
 
 const { Title, Text, Paragraph } = Typography;
 
-// 報酬データの型
+// Dynamic imports to avoid SSR issues
+const ethersImport = dynamic(() => import('ethers'), { ssr: false });
+
+// Reward data type
 interface RewardData {
   key: string;
   chainId: number;
@@ -41,7 +45,7 @@ interface BatchClaimProps {
   onClaimSuccess: (claimedRewardIds: string[]) => void;
 }
 
-export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
+const BatchClaimComponent: React.FC<BatchClaimProps> = ({
   rewards,
   contractAddress,
   onClaimSuccess
@@ -52,10 +56,24 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
   const [rewardsWithSignatures, setRewardsWithSignatures] = useState<RewardData[]>([]);
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [showExpiredModal, setShowExpiredModal] = useState(false);
+  const [ethers, setEthers] = useState<any>(null);
+  const [ABI, setABI] = useState<any>(null);
   
-  // 報酬データの更新タイマー
+  // Load ethers.js and ABI dynamically
   useEffect(() => {
-    // 定期的に有効期限をチェック
+    const loadDependencies = async () => {
+      const ethersModule = await import('ethers');
+      setEthers(ethersModule);
+      
+      const { RewardDistributorABI } = await import('../abis');
+      setABI(RewardDistributorABI);
+    };
+    
+    loadDependencies();
+  }, []);
+  
+  // Check expiry status periodically
+  useEffect(() => {
     const timer = setInterval(() => {
       updateExpiryStatus();
     }, 30000);
@@ -63,7 +81,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     return () => clearInterval(timer);
   }, [rewardsWithSignatures]);
   
-  // 有効期限ステータスの更新
+  // Update reward expiry status
   const updateExpiryStatus = () => {
     if (rewardsWithSignatures.length === 0) return;
     
@@ -76,7 +94,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
         const elapsed = now.getTime() - timestampMs;
         const percentage = Math.max(0, Math.min(100, 100 - (elapsed / totalDuration * 100)));
         
-        // 期限切れチェック
+        // Check if expired
         const newStatus = now > reward.expiresAt ? 'expired' : 'ready';
         
         return {
@@ -90,23 +108,30 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     
     setRewardsWithSignatures(updatedRewards);
     
-    // 期限切れの署名がある場合、警告表示
+    // Show warning if any selected rewards have expired signatures
     const hasExpired = updatedRewards.some(r => r.status === 'expired' && r.selected);
     if (hasExpired && !showExpiredModal) {
-      message.warning('一部の署名が期限切れになっています。新しい署名を取得してください。');
+      console.warn('Some signatures have expired');
     }
   };
 
-  // バッチ準備 (署名取得)
+  // Prepare signatures
   const prepareSignatures = async () => {
+    if (!ethers || !ABI) return;
+    
     if (selectedRewards.length === 0) {
-      message.warning('請求する報酬を選択してください');
+      console.warn('No rewards selected');
       return;
     }
     
     setPreparingSignatures(true);
     try {
-      // ウォレット接続
+      // Check if browser environment
+      if (typeof window === 'undefined' || !window.ethereum) {
+        throw new Error('MetaMask or compatible wallet not detected');
+      }
+      
+      // Connect wallet
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = provider.getSigner();
@@ -115,13 +140,13 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
       const preparedRewards = [...rewardsWithSignatures];
       let newSignaturesCount = 0;
       
-      // 各報酬について署名を取得
+      // Get signatures for each reward
       for (const reward of selectedRewards) {
-        // すでに有効な署名がある場合はスキップ
+        // Skip rewards that already have valid signatures
         if (reward.status === 'ready' && reward.signature) continue;
         
         try {
-          // バックエンドから署名を取得
+          // Get signature from backend
           const response = await fetch('/api/rewards/prepare-claim', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -135,7 +160,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
           });
           
           if (!response.ok) {
-            throw new Error(`報酬ID ${reward.rewardId} の署名取得に失敗しました`);
+            throw new Error(`Failed to get signature for reward ID ${reward.rewardId}`);
           }
           
           const data = await response.json();
@@ -177,94 +202,99 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
           newSignaturesCount++;
         } catch (error) {
           console.error(`Error preparing signature for reward ${reward.rewardId}:`, error);
-          message.error(`報酬ID ${reward.rewardId} の署名取得に失敗しました`);
         }
       }
       
       setRewardsWithSignatures(preparedRewards);
       
       if (newSignaturesCount > 0) {
-        message.success(`${newSignaturesCount}個の署名を取得しました！`);
+        console.log(`${newSignaturesCount} signatures obtained`);
       } else {
-        message.info('新しく取得した署名はありません');
+        console.info('No new signatures obtained');
       }
       
     } catch (error) {
       console.error('Error preparing signatures:', error);
-      message.error('署名の準備中にエラーが発生しました');
     } finally {
       setPreparingSignatures(false);
     }
   };
 
-  // バッチ請求実行
+  // Execute batch claim
   const executeBatchClaim = async () => {
-    // 署名済みかつ選択されている報酬のみフィルタリング
+    if (!ethers || !ABI) return;
+    
+    // Filter ready rewards with signatures
     const readyRewards = rewardsWithSignatures.filter(
       r => r.selected && r.status === 'ready' && r.signature
     );
     
     if (readyRewards.length === 0) {
-      message.warning('有効な署名を持つ報酬が選択されていません');
+      console.warn('No ready rewards selected');
       return;
     }
     
     setClaimingRewards(true);
     try {
-      // ウォレット接続
+      // Check if browser environment
+      if (typeof window === 'undefined' || !window.ethereum) {
+        throw new Error('MetaMask or compatible wallet not detected');
+      }
+      
+      // Connect wallet
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = provider.getSigner();
       
-      // コントラクトインスタンス
+      // Contract instance
       const contract = new ethers.Contract(
         contractAddress,
-        RewardDistributorABI,
+        ABI,
         signer
       );
       
-      // ノンス取得（すべての報酬で同じノンスを使用）
+      // Get nonce (same for all rewards in batch)
       const userAddress = await signer.getAddress();
       const nonce = await contract.getNonce(userAddress);
       
-      // バッチクレームパラメータの準備
+      // Prepare claim parameters
       const claimParams = readyRewards.map(reward => ({
         chainId: reward.chainId,
         assetId: reward.assetId,
         rewardId: reward.rewardId,
         timestamp: reward.timestamp,
         signature: reward.signature,
-        amount: ethers.utils.parseUnits(reward.amount, 18), // トークンに合わせて調整必要
+        amount: ethers.utils.parseUnits(reward.amount, 18), // Adjust for token decimals
         tokenId: reward.tokenId || 0
       }));
       
-      message.loading('バッチ請求のトランザクションを処理中...', 0);
+      console.log('Processing batch claim transaction...');
       
-      // バッチクレーム実行
+      // Execute batch claim
       const tx = await contract.claimRewardBatch(claimParams, nonce);
       const receipt = await tx.wait();
       
-      message.destroy();
+      console.log('Batch claim transaction completed');
       
-      // 成功イベントからクレームされた報酬IDを抽出
+      // Extract claimed reward IDs from events
       const batchEvent = receipt.events?.find(e => e.event === 'BatchRewardClaimed');
       const individualEvents = receipt.events?.filter(e => e.event === 'RewardClaimed') || [];
       
       if (batchEvent) {
         const claimCount = batchEvent.args.claimCount.toNumber();
-        message.success(`${claimCount}個の報酬請求が完了しました！`);
+        console.log(`${claimCount} rewards claimed successfully`);
         
-        // 成功した報酬を更新
+        // Get claimed reward IDs
         const claimedIds = individualEvents.map(e => {
           const assetId = e.args.assetId.toNumber();
           const rewardId = e.args.rewardId.toNumber();
           return `${assetId}-${rewardId}`;
         });
         
-        // 親コンポーネントに成功通知
+        // Notify parent component
         onClaimSuccess(claimedIds);
         
-        // 状態更新
+        // Update rewards status
         const updatedRewards = rewardsWithSignatures.map(reward => {
           const id = `${reward.assetId}-${reward.rewardId}`;
           if (claimedIds.includes(id)) {
@@ -277,25 +307,12 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
       }
     } catch (error) {
       console.error('Error claiming rewards batch:', error);
-      // エラーハンドリング改善
-      const errorMsg = (error as any).message || '不明なエラー';
-      
-      if (errorMsg.includes('user rejected')) {
-        message.error('トランザクションがキャンセルされました');
-      } else if (errorMsg.includes('insufficient funds')) {
-        message.error('ガス代が不足しています。ウォレットに十分なETHがあるか確認してください');
-      } else if (errorMsg.includes('No rewards claimed successfully')) {
-        message.error('報酬の請求に失敗しました。署名の有効期限が切れているか、すでに請求済みです');
-      } else {
-        message.error('バッチ請求処理中にエラーが発生しました: ' + errorMsg);
-      }
     } finally {
       setClaimingRewards(false);
-      message.destroy(); // ローディングメッセージをクリア
     }
   };
 
-  // 報酬の選択状態変更
+  // Toggle reward selection
   const toggleRewardSelection = (key: string) => {
     const updatedRewards = rewards.map(reward => {
       if (reward.key === key) {
@@ -308,7 +325,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     setSelectedRewards(selected);
   };
 
-  // すべての報酬選択/解除
+  // Toggle select all rewards
   const toggleSelectAll = (e: any) => {
     const isSelected = e.target.checked;
     const updatedRewards = rewards.map(reward => ({
@@ -319,7 +336,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     setSelectedRewards(isSelected ? [...updatedRewards] : []);
   };
 
-  // ステータスに基づくタグ表示
+  // Render status tag based on reward status
   const getStatusTag = (reward: RewardData) => {
     switch (reward.status) {
       case 'pending':
@@ -338,13 +355,13 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     }
   };
 
-  // 署名有効期限の進捗バー
+  // Render expiry progress bar
   const renderExpiryProgress = (reward: RewardData) => {
     if (!reward.expiryPercentage || reward.status !== 'ready') return null;
     
-    let color = '#52c41a'; // 緑
-    if (reward.expiryPercentage < 60) color = '#faad14'; // 黄色
-    if (reward.expiryPercentage < 30) color = '#f5222d'; // 赤
+    let color = '#52c41a'; // Green
+    if (reward.expiryPercentage < 60) color = '#faad14'; // Yellow
+    if (reward.expiryPercentage < 30) color = '#f5222d'; // Red
     
     return (
       <Tooltip title={reward.expiresAt ? `有効期限: ${formatDistanceToNow(reward.expiresAt, { addSuffix: true, locale: ja })}` : ''}>
@@ -353,7 +370,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     );
   };
 
-  // カラム定義
+  // Table columns
   const columns = [
     {
       title: <Checkbox onChange={toggleSelectAll} />,
@@ -398,7 +415,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     }
   ];
 
-  // 署名についての説明モーダル
+  // Info modal
   const renderInfoModal = () => {
     return (
       <Modal
@@ -451,7 +468,7 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     );
   };
 
-  // 期限切れモーダル
+  // Expired modal
   const renderExpiredModal = () => {
     const expiredRewards = rewardsWithSignatures.filter(
       r => r.selected && r.status === 'expired'
@@ -506,15 +523,26 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     );
   };
 
-  // バッチ請求可能な報酬数
+  // Count ready rewards
   const readyRewardsCount = rewardsWithSignatures.filter(
     r => r.selected && r.status === 'ready'
   ).length;
 
-  // 選択した報酬の中で期限切れのものがあるか
+  // Check if any selected rewards have expired
   const hasExpiredSelected = rewardsWithSignatures.some(
     r => r.selected && r.status === 'expired'
   );
+
+  // Show loading state while dependencies are loading
+  if (!ethers || !ABI) {
+    return (
+      <Card style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
+          <Spin tip="ライブラリをロード中..." />
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card style={{ marginBottom: 20 }}>
@@ -589,3 +617,5 @@ export const BatchClaimComponent: React.FC<BatchClaimProps> = ({
     </Card>
   );
 };
+
+export default BatchClaimComponent;

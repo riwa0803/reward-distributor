@@ -1,6 +1,7 @@
+'use client';
+
 import React, { useState, useEffect } from 'react';
-import { ethers } from 'ethers';
-import { Button, Card, Typography, Progress, Spin, message, Alert, Space, Tooltip, Modal, Steps } from 'antd';
+import { Button, Card, Typography, Progress, Spin, Alert, Space, Tooltip, Modal, Steps } from 'antd';
 import { 
   ClockCircleOutlined, 
   WarningOutlined, 
@@ -9,9 +10,12 @@ import {
   LockOutlined,
   SafetyOutlined
 } from '@ant-design/icons';
-import { RewardDistributorABI } from '../abis';
 import { formatDistanceToNow, formatDistance } from 'date-fns';
 import { ja } from 'date-fns/locale';
+import dynamic from 'next/dynamic';
+
+// Dynamic imports to avoid SSR issues
+const ethersImport = dynamic(() => import('ethers'), { ssr: false });
 
 const { Title, Text, Paragraph } = Typography;
 const { Step } = Steps;
@@ -24,7 +28,21 @@ interface ClaimRewardProps {
   contractAddress: string;
 }
 
-export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
+// Error messages mapping
+const ERROR_MESSAGES = {
+  'Airdrop is not valid': 'このAirdropはすでに終了しているか、無効になっています',
+  'Reward already claimed': 'この報酬はすでに請求済みです',
+  'Invalid signature': '署名が無効です。再度署名を取得してください',
+  'Signature expired': '署名の有効期限が切れています。新しい署名を取得してください',
+  'ERC20 transfer failed': 'トークン転送に失敗しました。提供者のアドレスに十分なトークンがあるか確認してください',
+  'Invalid nonce': 'トランザクションの順序が無効です。ページを更新して再試行してください',
+  'Invalid reward parameters': '報酬パラメータが無効です。システム管理者に連絡してください',
+  'User rejected request': 'トランザクションがキャンセルされました',
+  'Insufficient funds': 'ガス代が不足しています。ウォレットに十分なETHがあるか確認してください',
+  'Network error': 'ネットワーク接続に問題があります。接続を確認して再試行してください',
+};
+
+const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
   chainId,
   assetId,
   rewardId,
@@ -42,15 +60,30 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
   const [showInfoModal, setShowInfoModal] = useState(false);
   const [elapsedTime, setElapsedTime] = useState<string>('');
   const [totalDuration, setTotalDuration] = useState<string>('');
+  const [ethers, setEthers] = useState<any>(null);
+  const [ABI, setABI] = useState<any>(null);
 
-  // 署名の状態を表す色コード
+  // Load ethers.js and ABI dynamically
+  useEffect(() => {
+    const loadDependencies = async () => {
+      const ethersModule = await import('ethers');
+      setEthers(ethersModule);
+      
+      const { RewardDistributorABI } = await import('../abis');
+      setABI(RewardDistributorABI);
+    };
+    
+    loadDependencies();
+  }, []);
+
+  // Function to get status color based on percentage
   const getStatusColor = (percentage: number) => {
-    if (percentage > 60) return '#52c41a'; // 緑 (安全)
-    if (percentage > 30) return '#faad14'; // 黄色 (警告)
-    return '#f5222d'; // 赤 (危険)
+    if (percentage > 60) return '#52c41a'; // Green (safe)
+    if (percentage > 30) return '#faad14'; // Yellow (warning)
+    return '#f5222d'; // Red (danger)
   };
 
-  // 署名の状態を表すラベル
+  // Function to get status label based on percentage
   const getStatusLabel = (percentage: number) => {
     if (percentage > 60) return '安全';
     if (percentage > 30) return '警告';
@@ -58,8 +91,8 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
     return '期限切れ';
   };
 
+  // Timer for signature expiration
   useEffect(() => {
-    // 有効期限の更新タイマー
     let timer: NodeJS.Timeout;
     
     if (claimData && claimData.expiresAt) {
@@ -70,22 +103,22 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
         const totalDurationMs = (expiryTime - timestampMs);
         const elapsed = now - timestampMs;
         
-        // 経過時間と総時間のフォーマット
+        // Format elapsed time and total duration
         setElapsedTime(formatDistance(timestampMs, now, { locale: ja }));
         setTotalDuration(formatDistance(timestampMs, expiryTime, { locale: ja }));
         
         if (now < expiryTime) {
-          // 残り時間の計算
+          // Calculate remaining time
           const percent = Math.max(0, Math.min(100, 100 - (elapsed / totalDurationMs * 100)));
           setExpiryPercentage(percent);
           setTimeRemaining(formatDistanceToNow(expiryTime, { addSuffix: true, locale: ja }));
           
-          // 残り時間が少なくなったら警告表示
+          // Show warning when expiration is near
           if (percent <= 20 && percent > 10 && !showExpiredModal) {
-            message.warning('署名の有効期限が近づいています。早めに請求してください。');
+            console.warn('Signature expiration approaching');
           }
           
-          // 10%以下になったらモーダル表示
+          // Show modal when expiration is very near
           if (percent <= 10 && percent > 0 && !showExpiredModal) {
             setShowExpiredModal(true);
           }
@@ -95,7 +128,7 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
           setExpiryPercentage(0);
           setTimeRemaining('期限切れ');
           
-          // 期限切れのモーダル表示
+          // Show expired modal
           if (!showExpiredModal) {
             setShowExpiredModal(true);
           }
@@ -107,8 +140,10 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
     }
   }, [claimData, showExpiredModal]);
 
-  // 署名リクエスト
+  // Request signature
   const requestSignature = async () => {
+    if (!ethers) return;
+    
     setErrorMessage(null);
     setClaimSuccess(false);
     setShowExpiredModal(false);
@@ -116,13 +151,18 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
     try {
       setLoading(true);
       
-      // ウォレット接続
+      // Check if window is defined (browser environment)
+      if (typeof window === 'undefined' || !window.ethereum) {
+        throw new Error('MetaMask or compatible wallet not detected');
+      }
+      
+      // Connect to wallet
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = provider.getSigner();
       const userAddress = await signer.getAddress();
       
-      // バックエンドからの署名取得
+      // Get signature from backend
       const response = await fetch('/api/rewards/prepare-claim', {
         method: 'POST',
         headers: {
@@ -138,44 +178,69 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
       });
       
       if (!response.ok) {
-        throw new Error('Failed to prepare claim');
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to prepare claim');
       }
       
       const data = await response.json();
       setClaimData(data);
       
-      message.success('署名取得完了！今すぐ報酬を請求できます');
+      console.log('Signature obtained successfully');
     } catch (error) {
       console.error('Error preparing claim:', error);
-      message.error('署名取得に失敗しました: ' + (error as Error).message);
+      const errorMsg = (error as Error).message;
+      
+      // Customize error message
+      if (errorMsg.includes('Airdrop is not valid') || errorMsg.includes('expired')) {
+        setErrorMessage('このAirdropはすでに終了しているか、無効になっています');
+      } else if (errorMsg.includes('Reward already claimed')) {
+        setErrorMessage('この報酬はすでに請求済みです');
+      } else if (errorMsg.includes('Reward not found')) {
+        setErrorMessage('報酬が見つかりません。もしくはあなたは受取対象ではありません');
+      } else if (errorMsg.includes('User denied') || errorMsg.includes('user rejected')) {
+        setErrorMessage('ウォレット接続がキャンセルされました');
+      } else if (errorMsg.includes('network') || errorMsg.includes('connection')) {
+        setErrorMessage('ネットワーク接続に問題があります。接続を確認して再試行してください');
+      } else if (errorMsg.includes('MetaMask or compatible wallet not detected')) {
+        setErrorMessage('ウォレットが見つかりません。MetaMaskまたは互換性のあるウォレットをインストールしてください');
+      } else {
+        setErrorMessage(`署名取得に失敗しました: ${errorMsg}`);
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // 報酬請求実行
+  // Execute claim
   const executeClaimReward = async () => {
+    if (!ethers || !ABI) return;
+    
     if (!claimData) {
-      message.error('先に署名を取得してください');
+      setErrorMessage('先に署名を取得してください');
       return;
     }
     
     try {
       setClaiming(true);
       
-      // ウォレット接続
+      // Check if window is defined (browser environment)
+      if (typeof window === 'undefined' || !window.ethereum) {
+        throw new Error('MetaMask or compatible wallet not detected');
+      }
+      
+      // Connect to wallet
       const provider = new ethers.providers.Web3Provider(window.ethereum);
       await provider.send("eth_requestAccounts", []);
       const signer = provider.getSigner();
       
-      // コントラクトインスタンス
+      // Contract instance
       const contract = new ethers.Contract(
         contractAddress,
-        RewardDistributorABI,
+        ABI,
         signer
       );
       
-      // 報酬請求トランザクション
+      // Claim transaction
       const tx = await contract.claimReward(
         claimData.chainId,
         claimData.assetId,
@@ -187,40 +252,49 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
         claimData.tokenId
       );
       
-      message.loading('トランザクション処理中...', 0);
+      console.log('Transaction processing...');
       
-      // トランザクション確認待ち
+      // Wait for transaction confirmation
       await tx.wait();
       
-      message.destroy();
-      message.success('報酬請求が完了しました！');
+      console.log('Reward claim successful');
       
-      // 状態リセット
+      // Reset state
       setClaimData(null);
       setClaimSuccess(true);
     } catch (error) {
       console.error('Error claiming reward:', error);
-      // エラーメッセージの改善: Airdrop無効の特定エラーメッセージをわかりやすく表示
+      // Improve error messages
       const errorMsg = (error as any).message || '不明なエラー';
       
       if (errorMsg.includes('Airdrop is not valid')) {
         setErrorMessage('このAirdropはすでに終了しているか、無効になっています');
       } else if (errorMsg.includes('Signature expired')) {
         setErrorMessage('署名の有効期限が切れています。新しい署名を取得してください');
-        setClaimData(null); // 署名期限切れの場合はデータをクリア
+        setClaimData(null); // Clear data for expired signature
       } else if (errorMsg.includes('Reward already claimed')) {
         setErrorMessage('この報酬はすでに請求済みです');
+      } else if (errorMsg.includes('MetaMask or compatible wallet not detected')) {
+        setErrorMessage('ウォレットが見つかりません。MetaMaskまたは互換性のあるウォレットをインストールしてください');
       } else {
-        setErrorMessage('報酬請求に失敗しました: ' + errorMsg);
+        // Check for common errors
+        for (const [errorKey, errorValue] of Object.entries(ERROR_MESSAGES)) {
+          if (errorMsg.includes(errorKey)) {
+            setErrorMessage(errorValue);
+            break;
+          }
+        }
+        
+        if (!errorMessage) {
+          setErrorMessage('報酬請求に失敗しました: ' + errorMsg);
+        }
       }
-      
-      message.error('報酬請求に失敗しました');
     } finally {
       setClaiming(false);
     }
   };
 
-  // 署名についての説明モーダル
+  // Signature info modal
   const renderInfoModal = () => {
     return (
       <Modal
@@ -286,7 +360,7 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
     );
   };
 
-  // 期限切れモーダル
+  // Expiry modal
   const renderExpiredModal = () => {
     return (
       <Modal
@@ -339,6 +413,17 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
       </Modal>
     );
   };
+
+  // Check if dependencies are loaded
+  if (!ethers || !ABI) {
+    return (
+      <Card style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
+          <Spin tip="ライブラリをロード中..." />
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card style={{ marginBottom: 20 }}>
@@ -464,3 +549,5 @@ export const ClaimRewardButton: React.FC<ClaimRewardProps> = ({
     </Card>
   );
 };
+
+export default ClaimRewardButton;
